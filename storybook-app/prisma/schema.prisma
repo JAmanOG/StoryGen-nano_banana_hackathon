@@ -1,0 +1,111 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- Application Models ---
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  name         String?
+
+  stories  Story[]
+  sessions Session[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Story {
+  id             String       @id @default(cuid())
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId         String
+
+  title          String
+  author         String?
+  description    String?
+  genre          String?
+  targetAge      String?
+
+  fullScript     String
+  enhancedScript String?
+  isGenerated    Boolean      @default(false)
+  status         StoryStatus  @default(DRAFT)
+
+  scenes         Scene[]
+  exports        Export[]
+
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  publishedAt    DateTime?
+
+  @@index([userId])
+}
+
+enum StoryStatus {
+  DRAFT
+  GENERATED
+  PUBLISHED
+  ARCHIVED
+}
+
+model Scene {
+  id          String   @id @default(cuid())
+  story       Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  storyId     String
+
+  title       String
+  content     String
+  imagePrompt String
+  pageNumber  Int
+  imageUrl    String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([storyId])
+  @@unique([storyId, pageNumber])
+}
+
+model Export {
+  id        String        @id @default(cuid())
+  story     Story         @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  storyId   String
+  format    ExportFormat
+  url       String
+  meta      Json?
+  createdAt DateTime      @default(now())
+
+  @@index([storyId])
+}
+
+enum ExportFormat {
+  PDF
+  PNG
+  ZIP
+}

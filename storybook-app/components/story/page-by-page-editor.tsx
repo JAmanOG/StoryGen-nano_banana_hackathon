@@ -19,6 +19,8 @@ import {
   FileText,
   AlertCircle,
   Lightbulb,
+  Upload,
+  Image as ImageIcon,
 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { generateSinglePage } from "@/lib/story-generation"
@@ -32,6 +34,9 @@ interface StoryPage {
   isGenerated: boolean
   generatedAt?: Date
   imageUrl?: string
+  // Optional user-provided reference image for this page
+  refImageFile?: Blob
+  refImagePreview?: string
 }
 
 interface PageByPageStory {
@@ -94,13 +99,30 @@ export function PageByPageEditor() {
       content: "",
       imagePrompt: "",
       isGenerated: false,
+      refImageFile: undefined,
+      refImagePreview: undefined,
     }
 
-    setStory((prev) => ({
-      ...prev,
-      pages: [...prev.pages, newPage],
-      currentPageIndex: prev.pages.length,
-    }))
+    const updatedStory = {
+      ...story,
+      pages: [...story.pages, newPage],
+      currentPageIndex: story.pages.length,
+    }
+
+    setStory(updatedStory)
+
+    // Persist to localStorage and notify preview
+    try {
+      const persistable = {
+        ...updatedStory,
+        pages: updatedStory.pages.map(({ refImageFile, refImagePreview, ...rest }) => rest),
+      }
+      localStorage.setItem("pageByPageStory", JSON.stringify(persistable))
+      window.dispatchEvent(new Event("pageByPageStoryUpdated"))
+      console.log("[PBP] Story persisted and preview notified after adding page")
+    } catch (e) {
+      console.error("[PBP] Error persisting story after adding page", e)
+    }
 
     toast({
       title: "Page Added",
@@ -123,8 +145,11 @@ export function PageByPageEditor() {
       return
     }
 
-    setStory((prev) => {
-      const newPages = prev.pages.filter((_, index) => index !== prev.currentPageIndex)
+    const updatedStory = (() => {
+      const newPages = story.pages.filter((_, index) => index !== story.currentPageIndex)
+      // Revoke any object URLs for removed page
+      const removed = story.pages[story.currentPageIndex]
+      if (removed?.refImagePreview) URL.revokeObjectURL(removed.refImagePreview)
       // Renumber pages
       const renumberedPages = newPages.map((page, index) => ({
         ...page,
@@ -133,11 +158,26 @@ export function PageByPageEditor() {
       }))
 
       return {
-        ...prev,
+        ...story,
         pages: renumberedPages,
-        currentPageIndex: Math.min(prev.currentPageIndex, renumberedPages.length - 1),
+        currentPageIndex: Math.min(story.currentPageIndex, renumberedPages.length - 1),
       }
-    })
+    })()
+
+    setStory(updatedStory)
+
+    // Persist to localStorage and notify preview
+    try {
+      const persistable = {
+        ...updatedStory,
+        pages: updatedStory.pages.map(({ refImageFile, refImagePreview, ...rest }) => rest),
+      }
+      localStorage.setItem("pageByPageStory", JSON.stringify(persistable))
+      window.dispatchEvent(new Event("pageByPageStoryUpdated"))
+      console.log("[PBP] Story persisted and preview notified after deleting page")
+    } catch (e) {
+      console.error("[PBP] Error persisting story after deleting page", e)
+    }
 
     toast({
       title: "Page Deleted",
@@ -161,11 +201,37 @@ export function PageByPageEditor() {
       storyId: story.id,
       page: story.pages[story.currentPageIndex],
     })
-    // Save to localStorage
-    localStorage.setItem("pageByPageStory", JSON.stringify(story))
+    // Save to localStorage (omit Blob fields)
+    const persistable = {
+      ...story,
+      pages: story.pages.map(({ refImageFile, refImagePreview, ...rest }) => rest),
+    }
+    localStorage.setItem("pageByPageStory", JSON.stringify(persistable))
+    
+    // Notify preview to update
+    window.dispatchEvent(new Event("pageByPageStoryUpdated"))
+    console.log("[PBP] Story saved and preview notified")
+    
     toast({
       title: "Page Saved",
       description: "Current page has been saved successfully.",
+    })
+  }
+
+  const handleReferenceImageChange = (file?: File | null) => {
+    setStory((prev) => {
+      const pages = [...prev.pages]
+      const idx = prev.currentPageIndex
+      const old = pages[idx]
+      // Cleanup old preview URL
+      if (old?.refImagePreview) URL.revokeObjectURL(old.refImagePreview)
+      if (file) {
+        const preview = URL.createObjectURL(file)
+        pages[idx] = { ...old, refImageFile: file, refImagePreview: preview }
+      } else {
+        pages[idx] = { ...old, refImageFile: undefined, refImagePreview: undefined }
+      }
+      return { ...prev, pages }
     })
   }
 
@@ -203,8 +269,9 @@ export function PageByPageEditor() {
         pageNumber: currentPage.pageNumber,
         totalPages: story.pages.length,
         prevImageDataUrl: story.pages[story.currentPageIndex - 1]?.imageUrl,
+        userImage: currentPage.refImageFile,
       }
-      console.log("[PBP] POST /api/generate-page payload", payload)
+      console.log("[PBP] POST /api/generate-page payload", { ...payload, userImage: currentPage.refImageFile ? "<blob>" : undefined })
 
       const result = await generateSinglePage(payload)
       console.log("[PBP] /api/generate-page result", result)
@@ -225,6 +292,52 @@ export function PageByPageEditor() {
               : page,
           ),
         }))
+
+        // Persist updated story so other components (preview) can pick it up
+        // Omit Blob fields when persisting
+        const persistable = (() => {
+          // Build the latest story object by reading the just-updated state synchronously
+          // Note: setStory is async, so recreate the expected updated story here
+          const updatedPages = story.pages.map((page, index) =>
+            index === story.currentPageIndex
+              ? {
+                  id: page.id,
+                  pageNumber: page.pageNumber,
+                  title: page.title,
+                  content: result.enhancedContent || page.content,
+                  imagePrompt: result.imagePrompt || page.imagePrompt,
+                  isGenerated: true,
+                  generatedAt: new Date().toISOString(),
+                  imageUrl: result.imageDataUrl || page.imageUrl,
+                }
+              : {
+                  id: page.id,
+                  pageNumber: page.pageNumber,
+                  title: page.title,
+                  content: page.content,
+                  imagePrompt: page.imagePrompt,
+                  isGenerated: page.isGenerated,
+                  generatedAt: page.generatedAt ? page.generatedAt.toString() : undefined,
+                  imageUrl: page.imageUrl,
+                },
+          )
+
+          return {
+            id: story.id,
+            title: story.title,
+            author: story.author,
+            pages: updatedPages,
+            currentPageIndex: story.currentPageIndex,
+          }
+        })()
+
+        try {
+          localStorage.setItem("pageByPageStory", JSON.stringify(persistable))
+          // Notify preview to reload the story (same-window custom event)
+          window.dispatchEvent(new Event("pageByPageStoryUpdated"))
+        } catch (e) {
+          console.error("[PBP] Error persisting generated page to localStorage", e)
+        }
 
         if (result.suggestions) {
           setSuggestions(result.suggestions)
@@ -257,6 +370,7 @@ export function PageByPageEditor() {
   }
 
   return (
+    <>
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
@@ -424,14 +538,49 @@ export function PageByPageEditor() {
             </div>
           </div>
 
-          <div>
-            <Label htmlFor="imagePrompt">Image Description</Label>
-            <Input
-              id="imagePrompt"
-              placeholder="Describe the image for this page..."
-              value={currentPage.imagePrompt}
-              onChange={(e) => handlePageChange("imagePrompt", e.target.value)}
-            />
+          <div className="space-y-3">
+            <div>
+              <Label htmlFor="imagePrompt">Image Description</Label>
+              <Input
+                id="imagePrompt"
+                placeholder="Describe the image for this page..."
+                value={currentPage.imagePrompt}
+                onChange={(e) => handlePageChange("imagePrompt", e.target.value)}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label className="flex items-center gap-2">
+                <ImageIcon className="h-4 w-4" /> Reference Image (optional)
+              </Label>
+              <div className="flex items-center gap-3">
+                <Input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => handleReferenceImageChange(e.target.files?.[0])}
+                  className="file:mr-3 file:rounded file:border file:px-3 file:py-1 file:text-sm"
+                />
+                {currentPage.refImagePreview && (
+                  <div className="flex items-center gap-2">
+                    <img
+                      src={currentPage.refImagePreview}
+                      alt="Reference preview"
+                      className="h-16 w-16 object-cover rounded border"
+                    />
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleReferenceImageChange(null)}
+                      className="gap-2 bg-transparent"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                      Remove
+                    </Button>
+                  </div>
+                )}
+              </div>
+              <p className="text-xs text-gray-500 dark:text-gray-400">Uploaded image helps maintain visual continuity.</p>
+            </div>
           </div>
 
           {currentPage.isGenerated && currentPage.generatedAt && (
@@ -491,9 +640,7 @@ export function PageByPageEditor() {
                 onClick={() => setStory((prev) => ({ ...prev, currentPageIndex: index }))}
               >
                 <div className="flex items-center gap-3">
-                  <Badge variant={index === story.currentPageIndex ? "default" : "outline"}>
-                    Page {page.pageNumber}
-                  </Badge>
+                  <Badge variant={index === story.currentPageIndex ? "default" : "outline"}>Page {page.pageNumber}</Badge>
                   <span className="font-medium text-gray-900 dark:text-white">{page.title}</span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -519,5 +666,6 @@ export function PageByPageEditor() {
         </Alert>
       )}
     </div>
+    </>
   )
 }

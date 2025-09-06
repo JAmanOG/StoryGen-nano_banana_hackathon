@@ -29,17 +29,34 @@ export function PageByPagePreview() {
   const [currentPage, setCurrentPage] = useState(0) // 0 = cover, 1+ = story pages
 
   useEffect(() => {
-    const savedStory = localStorage.getItem("pageByPageStory")
-    if (savedStory) {
-      const parsed = JSON.parse(savedStory)
-      console.log("[PBP Preview] Loaded story from localStorage", {
-        title: parsed.title,
-        pages: parsed.pages?.length,
-        generatedPages: parsed.pages?.filter((p: any) => p.isGenerated).length,
-      })
-      setStory(parsed)
-    } else {
-      console.log("[PBP Preview] No story in localStorage")
+    const loadFromStorage = () => {
+      const savedStory = localStorage.getItem("pageByPageStory")
+      if (savedStory) {
+        const parsed = JSON.parse(savedStory)
+        console.log("[PBP Preview] Loaded story from localStorage", {
+          title: parsed.title,
+          pages: parsed.pages?.length,
+          generatedPages: parsed.pages?.filter((p: any) => p.isGenerated).length,
+        })
+        setStory(parsed)
+      } else {
+        console.log("[PBP Preview] No story in localStorage")
+        setStory(null)
+      }
+    }
+
+    // Initial load
+    loadFromStorage()
+
+    // Listen for updates from the editor
+    const handler = () => {
+      console.log("[PBP Preview] Detected pageByPageStoryUpdated event, reloading story from localStorage")
+      loadFromStorage()
+    }
+
+    window.addEventListener("pageByPageStoryUpdated", handler)
+    return () => {
+      window.removeEventListener("pageByPageStoryUpdated", handler)
     }
   }, [])
 

@@ -57,6 +57,13 @@ export function WholeStoryEditor() {
   const [generationError, setGenerationError] = useState<string | null>(null)
   const { toast } = useToast()
 
+  // Derived flags for contextual generation
+  const hasTitle = !!story.metadata.title?.trim()
+  const canGenerateFromScript = hasTitle && story.fullScript.trim().length > 0
+  const canGenerateFromScenes = hasTitle && story.scenes.length > 0 && story.scenes.some((s) => (s.content?.trim()?.length || 0) > 0)
+  const canGenerate = activeTab === "script" ? canGenerateFromScript : activeTab === "scenes" ? canGenerateFromScenes : false
+  const canEdit = !story.isGenerated
+
   const handleMetadataChange = (field: keyof StoryMetadata, value: string) => {
     console.log("[Whole] Metadata change", { field, value })
     setStory((prev) => ({
@@ -106,6 +113,12 @@ export function WholeStoryEditor() {
     })
     // Save story to local storage or backend
     localStorage.setItem("wholeStory", JSON.stringify(story))
+    // Notify any preview components in the same window to reload
+    try {
+      window.dispatchEvent(new Event("wholeStoryUpdated"))
+    } catch (e) {
+      console.warn("[Whole] Could not dispatch wholeStoryUpdated event", e)
+    }
     toast({
       title: "Story Saved",
       description: "Your story has been saved successfully.",
@@ -113,16 +126,42 @@ export function WholeStoryEditor() {
   }
 
   const handleGenerateStorybook = async () => {
-    console.log("[Whole] Generate story clicked")
-    if (!story.metadata.title || !story.fullScript) {
-      console.warn("[Whole] Missing info for generation", {
-        hasTitle: !!story.metadata.title,
-        hasScript: !!story.fullScript,
-      })
+    console.log("[Whole] Generate story clicked", { activeTab })
+
+    // Title is required regardless of source
+    if (!hasTitle) {
       toast({
-        title: "Missing Information",
-        description: "Please fill in the story title and script before generating.",
+        title: "Missing Title",
+        description: "Please provide a story title before generating.",
         variant: "destructive",
+      })
+      return
+    }
+
+    // Validate based on active section
+    if (activeTab === "script") {
+      if (!canGenerateFromScript) {
+        toast({
+          title: "Missing Script",
+          description: "Please write your full script before generating from the Full Script tab.",
+          variant: "destructive",
+        })
+        return
+      }
+    } else if (activeTab === "scenes") {
+      if (!canGenerateFromScenes) {
+        toast({
+          title: "No Scenes",
+          description: "Add at least one scene with content before generating from the Scene Breakdown tab.",
+          variant: "destructive",
+        })
+        return
+      }
+    } else {
+      // If user is on metadata, don't allow generate
+      toast({
+        title: "Select a Section",
+        description: "Switch to Full Script or Scene Breakdown to generate.",
       })
       return
     }
@@ -131,13 +170,16 @@ export function WholeStoryEditor() {
     setGenerationError(null)
 
     try {
+      // Build payload based on active tab
       const payload = {
         metadata: story.metadata,
-        fullScript: story.fullScript,
-        scenes: story.scenes,
+        fullScript: activeTab === "script" ? story.fullScript : "",
+        scenes: activeTab === "scenes" ? story.scenes : [],
       }
+
       console.log("[Whole] POST /api/generate-story payload", {
         title: payload.metadata.title,
+        source: activeTab,
         scenes: payload.scenes.length,
         scriptChars: payload.fullScript.length,
       })
@@ -146,19 +188,33 @@ export function WholeStoryEditor() {
       console.log("[Whole] /api/generate-story result", result)
 
       if (result.success && result.scenes) {
-        setStory((prev) => ({
-          ...prev,
-          fullScript: result.enhancedScript || prev.fullScript,
-          scenes: result.scenes!.map((scene, index) => ({
-            id: prev.scenes[index]?.id || `scene-${Date.now()}-${index}`,
-            title: scene.title,
-            content: scene.content,
-            imagePrompt: scene.imagePrompt,
-            pageNumber: scene.pageNumber,
-            imageUrl: scene.imageUrl,
-          })),
-          isGenerated: true,
+        // Build a new story object (use current story for ids if available)
+        const newScenes = result.scenes!.map((scene, index) => ({
+          id: story.scenes[index]?.id || `scene-${Date.now()}-${index}`,
+          title: scene.title,
+          content: scene.content,
+          imagePrompt: scene.imagePrompt,
+          pageNumber: scene.pageNumber,
+          imageUrl: scene.imageUrl,
         }))
+
+        const newStory = {
+          ...story,
+          fullScript: result.enhancedScript || story.fullScript,
+          scenes: newScenes,
+          isGenerated: true,
+        }
+
+        // Update state and persist so preview can pick up the changes
+        setStory(newStory)
+        console.log("newStory",newStory)
+        try {
+          localStorage.setItem("wholeStory", JSON.stringify(newStory))
+          window.dispatchEvent(new Event("wholeStoryUpdated"))
+          console.log("[PBP] Story persisted and preview notified after adding page")
+        } catch (e) {
+          console.error("[Whole] Failed to persist generated story", e)
+        }
 
         toast({
           title: "Storybook Generated!",
@@ -168,25 +224,18 @@ export function WholeStoryEditor() {
         setGenerationError(result.error || "Failed to generate story")
         toast({
           title: "Generation Failed",
-          description: result.error || "Failed to generate story. Please try again.",
+          description: result.error || "Something went wrong while generating your storybook.",
           variant: "destructive",
         })
       }
-    } catch (error) {
-      console.error("[Whole] Generate error", error)
-      const errorMessage = "An unexpected error occurred during generation."
-      setGenerationError(errorMessage)
-      toast({
-        title: "Generation Error",
-        description: errorMessage,
-        variant: "destructive",
-      })
+    } catch (err) {
+      console.error("[Whole] Generation error", err)
+      setGenerationError("Network error. Please try again.")
+      toast({ title: "Network Error", description: "Please check your connection and try again.", variant: "destructive" })
     } finally {
       setIsGenerating(false)
     }
   }
-
-  const canEdit = !story.isGenerated
 
   return (
     <div className="space-y-6">
@@ -203,7 +252,7 @@ export function WholeStoryEditor() {
             </Button>
           )}
           {canEdit ? (
-            <Button onClick={handleGenerateStorybook} disabled={isGenerating} className="gap-2">
+            <Button onClick={handleGenerateStorybook} disabled={isGenerating || !canGenerate} className="gap-2">
               {isGenerating ? (
                 <>
                   <Clock className="h-4 w-4 animate-spin" />
@@ -440,6 +489,15 @@ export function WholeStoryEditor() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* temp display images from the response */}
+      <div className="image-display">
+              {
+                story.scenes.map((scene) => (
+                  <img key={scene.id} src={scene.imageUrl} alt={scene.imagePrompt} className="w-full h-auto" />
+                ))
+              }
+      </div>
     </div>
   )
 }

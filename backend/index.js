@@ -25,6 +25,9 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
+// Serve uploads as static files
+app.use("/uploads", express.static(uploadsDir));
+
 // Multer setup for file uploads
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadsDir),
@@ -38,10 +41,32 @@ const upload = multer({ storage });
 
 // Initialize Google GenAI client
 const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+const contextapiKey = process.env.CONTEXT_GOOGLE_API_KEY || process.env.CONTEXT_GEMINI_API_KEY;
 if (!apiKey) {
   console.warn("[WARN] GOOGLE_API_KEY not set. Set it in .env");
 }
 const genAI = new GoogleGenAI({ apiKey });
+const ContextgenAI = new GoogleGenAI({ contextapiKey });
+
+// Simple file upload endpoint
+app.post("/upload", upload.single("file"), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: "No file uploaded" });
+    }
+    const url = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+    return res.json({
+      success: true,
+      url,
+      filename: req.file.filename,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+    });
+  } catch (err) {
+    console.error("[/upload] error", err);
+    return res.status(500).json({ success: false, error: "Upload failed" });
+  }
+});
 
 // Helpers
 function fileToBase64(filePath) {
@@ -69,18 +94,25 @@ function extractTextFromResponse(resp) {
     const parts = resp?.candidates?.[0]?.content?.parts;
     const textPart = parts?.find((p) => typeof p?.text === "string");
     if (textPart?.text) return textPart.text;
-  } catch {}
+  } catch {
+    console.warn("Failed to extract from candidates[0].content.parts");
+  }
   try {
     const text = resp?.contents?.[0]?.text;
     if (text) return text;
-  } catch {}
+  } catch {
+    console.warn("Failed to extract from resp.contents[0].text");
+  }
   try {
     if (typeof resp?.output_text === "string") return resp.output_text;
-  } catch {}
+  } catch {
+    console.warn("Failed to extract from resp.output_text");
+  }
   return "";
 }
 
 function extractImagesFromResponse(resp) {
+  console.log("Extracting images from response:", resp);
   // Return array of { mimeType, data } from inlineData parts
   const out = [];
   const parts = resp?.candidates?.[0]?.content?.parts || [];
@@ -102,19 +134,61 @@ async function divideScriptIntoScenes(fullScript) {
 
   const sysPrompt = `You are a helpful assistant that divides a children's story script into scenes. Each scene should be concise and focused on a single event or setting.\n\nScript:\n${fullScript}\n\nReturn the scenes as a JSON array of short strings. Example:\n[\n  "Scene 1: A bustling city street at dawn.",\n  "Scene 2: A quiet park with children playing.",\n  "Scene 3: A cozy café where two friends meet."\n]`;
 
-  const response = await genAI.models.generateContent({
+  const response = await ContextgenAI.models.generateContent({
     model: "gemini-2.0-flash",
     contents: sysPrompt,
   });
 
+  console.log("Raw divided scenes response:", response);
+
   const text = extractTextFromResponse(response);
+  console.log("Divided scenes response text:", text);
+
+  // Attempt to parse the text as JSON array of strings
   let scenes;
-  try {
-    scenes = JSON.parse(text);
-    if (!Array.isArray(scenes)) throw new Error("Parsed scenes is not an array");
-  } catch (err) {
-    throw new Error("Failed to parse scenes JSON: " + (err?.message || String(err)) + "\nRaw: " + text);
+
+  // Helper: attempt JSON.parse with trimming
+  const tryParse = (str) => {
+    try {
+      return JSON.parse(str);
+    } catch (e) {
+      return null;
+    }
+  };
+
+  // 1) Try direct parse
+  scenes = tryParse(text);
+
+  console.log("Initial parse attempt:", scenes);
+
+  // 2) If failed, strip common markdown/fence wrappers like ```json ... ``` or ``` ... ```
+  if (!Array.isArray(scenes)) {
+    // Extract content inside triple backticks if present
+    const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenceMatch && fenceMatch[1]) {
+      const inner = fenceMatch[1].trim();
+      scenes = tryParse(inner);
+    }
   }
+  console.log("After fence stripping parse attempt:", scenes);
+
+  // 3) If still failed, try to extract the first JSON array found by locating the first '[' and the last ']' and parsing that slice
+  if (!Array.isArray(scenes)) {
+    const firstBracket = text.indexOf('[');
+    const lastBracket = text.lastIndexOf(']');
+    if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+      const candidate = text.slice(firstBracket, lastBracket + 1);
+      scenes = tryParse(candidate);
+    }
+  }
+
+  console.log("After bracket extraction parse attempt:", scenes);
+
+  // 4) Give up with detailed error for debugging
+  if (!Array.isArray(scenes)) {
+    throw new Error("Failed to parse scenes JSON: could not extract a valid JSON array" + "\nRaw: " + text);
+  }
+
   return scenes;
 }
 
@@ -123,7 +197,7 @@ async function generatePagePlan({ scene, globalContext }) {
 
   const schemaHint = `Format:\n{\n  "enhancedContent": "...",\n  "imagePrompt": "...",\n  "suggestions": ["...","...","..."]\n}`;
 
-  const response = await genAI.models.generateContent({
+  const response = await ContextgenAI.models.generateContent({
     model: "gemini-2.0-flash",
     contents: `${prompt}\n\n${schemaHint}`,
   });
@@ -150,6 +224,7 @@ async function generatePagePlan({ scene, globalContext }) {
 }
 
 async function generateImage({ prompt, referenceInlineParts = [] }) {
+  console.log("Generating the image");
   // Use an image-capable preview model. If unavailable, this will just not return images.
   const parts = [
     { text: prompt },
@@ -168,12 +243,20 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
+async function generateImageWithTimeout(args, timeoutMs = 30000) {
+  return Promise.race([
+    generateImage(args),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Image generation timeout")), timeoutMs))
+  ]);
+}
+
 // Page-by-page generation: accepts multipart/form-data
 // Fields (text): pageContent, imagePrompt, storyContext, pageNumber, totalPages, globalContext, prevImage (dataURL base64 optional)
 // Files: userImage (optional)
 app.post("/page-generate", upload.single("userImage"), async (req, res) => {
   try {
     const body = req.body || {};
+    console.log("Received /page-generate request with body:", body, "and file:", req.file);
     const pageContent = body.pageContent || "";
     const imagePromptIn = body.imagePrompt || "";
     const storyContext = body.storyContext || "";
@@ -188,9 +271,11 @@ app.post("/page-generate", upload.single("userImage"), async (req, res) => {
 
     // Build plan (enhanced content + image prompt)
     const plan = await generatePagePlan({
-      scene: `${storyContext ? storyContext + "\n" : ""}${pageContent}`,
+      scene: `${storyContext ? storyContext + "\n" : ""}${pageContent}${imagePromptIn ? "\n" + "image description by the user:"+ imagePromptIn : ""}`,
       globalContext,
     });
+
+    console.log("Generated page plan:", plan);
 
     // Assemble reference images for continuity
     const inlineRefs = [];
@@ -208,16 +293,24 @@ app.post("/page-generate", upload.single("userImage"), async (req, res) => {
     // Build final image prompt with continuity note
     const finalImagePrompt = [
       globalContext ? `Global theme: ${globalContext}` : null,
+      plan.enhancedContent,
       imagePromptIn || plan.imagePrompt,
       prevInline ? "Maintain visual continuity with the previous image." : null,
     ]
       .filter(Boolean)
       .join("\n\n");
 
+      console.log("Final image prompt:", finalImagePrompt);
+      console.log("Reference inline parts:", inlineRefs);
+
     const image = await generateImage({
       prompt: finalImagePrompt,
       referenceInlineParts: inlineRefs,
     });
+
+    
+
+    console.log("Generated image:", image);
 
     res.json({
       success: true,
@@ -244,6 +337,7 @@ app.post("/page-generate", upload.single("userImage"), async (req, res) => {
 // Files: userImage (optional)
 app.post("/whole-story-generate", upload.single("userImage"), async (req, res) => {
   try {
+    console.log("Received /whole-story-generate request with body:", req.body, "and file:", req.file);
     const metadata = (() => {
       try { return JSON.parse(req.body?.metadata || "null"); } catch { return null; }
     })();
@@ -257,11 +351,13 @@ app.post("/whole-story-generate", upload.single("userImage"), async (req, res) =
       return res.status(400).json({ error: "Provide fullScript or scenes" });
     }
 
+    //  return
     let scenes = scenesIn;
     if (!Array.isArray(scenes) || scenes.length === 0) {
       scenes = await divideScriptIntoScenes(fullScript);
     }
 
+    console.log("Using scenes:");
     // Initial reference image if provided
     const inlineRefsBase = [];
     if (req.file) {
@@ -277,6 +373,7 @@ app.post("/whole-story-generate", upload.single("userImage"), async (req, res) =
     let lastImageInline = inlineRefsBase[0] || null;
 
     for (let i = 0; i < scenes.length; i++) {
+      console.log(`[whole-story-generate] Generating page ${i + 1}/${scenes.length}`);
       const scene = scenes[i];
       const plan = await generatePagePlan({ scene, globalContext });
 
@@ -287,16 +384,21 @@ app.post("/whole-story-generate", upload.single("userImage"), async (req, res) =
       ]
         .filter(Boolean)
         .join("\n\n");
+        let image = null
+        try {
 
-      const image = await generateImage({
+      image = await generateImageWithTimeout({
         prompt,
         referenceInlineParts: lastImageInline ? [lastImageInline] : inlineRefsBase,
-      });
+      }, 30000);
 
       if (image) {
         lastImageInline = { inlineData: { mimeType: image.mimeType, data: image.data } };
       }
-
+    } catch (err) {
+      console.error(`[whole-story-generate] Image generation failed for page ${i + 1}:`, err);
+    }
+  
       pages.push({
         pageNumber: i + 1,
         pageContent: plan.enhancedContent,

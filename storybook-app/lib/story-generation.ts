@@ -66,6 +66,53 @@ function toFormData(obj: Record<string, any>) {
   return fd
 }
 
+// Network robustness defaults (configurable via NEXT_PUBLIC_ env)
+const DEFAULT_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_REQUEST_TIMEOUT_MS || 600000)
+const DEFAULT_RETRIES = Number(process.env.NEXT_PUBLIC_REQUEST_RETRIES || 2)
+
+async function fetchJsonWithRetry(
+  url: string,
+  init: RequestInit,
+  opts?: { timeoutMs?: number; retries?: number }
+): Promise<{ ok: boolean; status: number; json: any }> {
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const retries = opts?.retries ?? DEFAULT_RETRIES
+  let attempt = 0
+  let lastError: any
+
+  while (attempt <= retries) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const res = await fetch(url, { ...init, signal: controller.signal })
+      clearTimeout(timer)
+      let json: any = null
+      try { json = await res.json() } catch {}
+
+      if (res.ok) return { ok: true, status: res.status, json }
+
+      // Retry for transient errors
+      if (res.status === 408 || res.status === 429 || (res.status >= 500 && res.status <= 599)) {
+        const backoff = Math.min(1000 * Math.pow(2, attempt), 5000) + Math.floor(Math.random() * 250)
+        await new Promise((r) => setTimeout(r, backoff))
+        attempt++
+        continue
+      }
+
+      return { ok: false, status: res.status, json }
+    } catch (err) {
+      clearTimeout(timer)
+      lastError = err
+      // Retry on network/abort
+      const backoff = Math.min(1000 * Math.pow(2, attempt), 5000) + Math.floor(Math.random() * 250)
+      await new Promise((r) => setTimeout(r, backoff))
+      attempt++
+    }
+  }
+
+  throw lastError ?? new Error("Network error")
+}
+
 export async function generateWholeStory(storyData: {
   metadata: {
     title: string
@@ -82,6 +129,7 @@ export async function generateWholeStory(storyData: {
     imagePrompt: string
     pageNumber: number
   }>
+  userImage?: Blob // optional reference image
 }): Promise<GenerationResult> {
   try {
     const globalContext = buildGlobalContext()
@@ -91,19 +139,18 @@ export async function generateWholeStory(storyData: {
       fullScript: storyData.fullScript,
       scenes: storyData.scenes.map((s) => ({ title: s.title, content: s.content, imagePrompt: s.imagePrompt, pageNumber: s.pageNumber })),
       globalContext,
+      userImage: storyData.userImage,
     })
 
-    const response = await fetch(`${BACKEND_URL}/whole-story-generate`, {
+    const { ok, json: result } = await fetchJsonWithRetry(`${BACKEND_URL}/whole-story-generate`, {
       method: "POST",
       body,
     })
 
-    const result = await response.json()
-
-    if (!response.ok) {
+    if (!ok) {
       return {
         success: false,
-        error: result.error || "Failed to generate story",
+        error: result?.error || "Failed to generate story",
       }
     }
 
@@ -141,6 +188,7 @@ export async function generateSinglePage(pageData: {
   pageNumber: number
   totalPages: number
   prevImageDataUrl?: string
+  userImage?: Blob // optional reference image
 }): Promise<GenerationResult> {
   try {
     const globalContext = buildGlobalContext()
@@ -153,19 +201,18 @@ export async function generateSinglePage(pageData: {
       totalPages: String(pageData.totalPages),
       globalContext,
       prevImage: pageData.prevImageDataUrl,
+      userImage: pageData.userImage,
     })
 
-    const response = await fetch(`${BACKEND_URL}/page-generate`, {
+    const { ok, json: result } = await fetchJsonWithRetry(`${BACKEND_URL}/page-generate`, {
       method: "POST",
       body,
     })
 
-    const result = await response.json()
-
-    if (!response.ok) {
+    if (!ok) {
       return {
         success: false,
-        error: result.error || "Failed to generate page",
+        error: result?.error || "Failed to generate page",
       }
     }
 

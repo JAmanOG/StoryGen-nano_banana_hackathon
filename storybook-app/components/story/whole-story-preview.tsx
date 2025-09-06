@@ -34,17 +34,40 @@ export function WholeStoryPreview() {
   const [currentPage, setCurrentPage] = useState(0) // 0 = cover, 1+ = scenes
 
   useEffect(() => {
-    const savedStory = localStorage.getItem("wholeStory")
-    if (savedStory) {
-      const parsed = JSON.parse(savedStory)
-      console.log("[Whole Preview] Loaded story from localStorage", {
-        title: parsed?.metadata?.title,
-        scenes: parsed?.scenes?.length,
-        isGenerated: parsed?.isGenerated,
-      })
-      setStory(parsed)
-    } else {
-      console.log("[Whole Preview] No wholeStory in localStorage")
+    const load = () => {
+      const savedStory = localStorage.getItem("wholeStory")
+      if (savedStory) {
+        try {
+          const parsed = JSON.parse(savedStory)
+          console.log("[Whole Preview] Loaded story from localStorage", {
+            title: parsed?.metadata?.title,
+            scenes: parsed?.scenes?.length,
+            isGenerated: parsed?.isGenerated,
+          })
+          setStory(parsed)
+          setCurrentPage(0)
+        } catch (e) {
+          console.error("[Whole Preview] Failed to parse wholeStory from localStorage", e)
+          setStory(null)
+        }
+      } else {
+        console.log("[Whole Preview] No wholeStory in localStorage")
+        setStory(null)
+      }
+    }
+
+    // Initial load
+    load()
+
+    // Listen for updates from the editor
+    const handler = () => {
+      console.log("[Whole Preview] Detected wholeStoryUpdated event, reloading story from localStorage")
+      load()
+    }
+
+    window.addEventListener("wholeStoryUpdated", handler)
+    return () => {
+      window.removeEventListener("wholeStoryUpdated", handler)
     }
   }, [])
 
@@ -63,15 +86,8 @@ export function WholeStoryPreview() {
     )
   }
 
-  if (!story.isGenerated) {
-    return (
-      <div className="text-center py-12">
-        <BookOpen className="h-12 w-12 mx-auto text-gray-400 mb-4" />
-        <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">Story not generated yet</h3>
-        <p className="text-gray-600 dark:text-gray-300">Generate your story first to see the preview</p>
-      </div>
-    )
-  }
+  // Allow preview for saved drafts as well as generated stories
+  // (This mirrors the page-by-page preview behavior where saved drafts are visible.)
 
   const totalPages = story.scenes.length + 1 // +1 for cover page
 

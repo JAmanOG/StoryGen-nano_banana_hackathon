@@ -34,6 +34,15 @@ export function PageByPagePreview() {
       exportedAt: new Date().toISOString(),
       format: "preview",
     },
+    // include cover when available so EnhancedPreview can render the cover (currentPage === 0)
+    cover: story.cover
+      ? {
+          title: story.cover.title || story.title,
+          subtitle: story.cover.subtitle,
+          imageUrl: story.cover.imageUrl,
+          imagePrompt: story.cover.imagePrompt,
+        }
+      : undefined,
     content: story.pages.map((page) => ({
       pageNumber: page.pageNumber,
       title: page.title,

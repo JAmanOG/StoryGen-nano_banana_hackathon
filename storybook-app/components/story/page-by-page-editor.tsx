@@ -149,7 +149,7 @@ export function PageByPageEditor() {
       const payload = {
         pageContent: currentPage.content,
         imagePrompt: currentPage.imagePrompt,
-        storyContext,
+        storyContext: storyContext,
         pageNumber: currentPage.pageNumber,
         totalPages: story.pages.length,
         prevImageDataUrl: story.pages[story.currentPageIndex - 1]?.imageUrl,

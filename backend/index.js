@@ -232,7 +232,7 @@ async function generatePagePlan({ scene, globalContext }) {
     globalContext
       ? `Global Context (apply consistently across prose and image prompt):\n${globalContext}\n`
       : ""
-  }\nScene:\n${scene}\n\nReturn strict JSON with keys: enhancedContent (string), imagePrompt (string), suggestions (string[3]).`;
+  }\nScene:\n${scene}\n\nReturn strict JSON with keys: enhancedContent (string) - should be readable with proper spacing and separation of dialogue - keep the original thing taste don't modify completely, imagePrompt (string), suggestions (string[3]).`;
 
   const schemaHint = `Format:\n{\n  "enhancedContent": "...",\n  "imagePrompt": "...",\n  "suggestions": ["...","...","..."]\n}`;
 
@@ -240,14 +240,21 @@ async function generatePagePlan({ scene, globalContext }) {
     model: "gemini-2.0-flash",
     contents: `${prompt}\n\n${schemaHint}`,
   });
-  const text = extractTextFromResponse(response);
+  let  text = extractTextFromResponse(response);
+  console.log("Raw page plan response text:", text);
+  text = text
+  .replace(/```json\s*/g, "")
+  .replace(/```\s*$/g, "")
+  .trim();
+
   let obj;
   try {
     obj = JSON.parse(text);
+    console.log("Parsed page plan:", obj);
   } catch (e) {
     // fallback minimal structure
     obj = {
-      enhancedContent: scene,
+      // enhancedContent: scene,
       imagePrompt: `Illustration of: ${scene}`,
       suggestions: [
         "Tighten pacing",
@@ -433,6 +440,16 @@ app.post("/page-generate", upload.single("userImage"), async (req, res) => {
       return res.status(400).json({ error: "pageContent is required" });
     }
 
+    console.log("Global context:", globalContext);
+    console.log("Previous page content:", prevPageContent);
+    console.log("Previous page image prompt:", prevPageImagePrompt);
+    console.log("Previous image data URL:", prevImageDataUrl ? "present" : "none");
+    console.log("User image file:", req.file ? req.file.filename : "none");
+    console.log("Page content received:", pageContent);
+    console.log("Image prompt received:", imagePromptIn);
+    console.log("Story context received:", storyContext);
+    console.log("Page number:", pageNumber, "of", totalPages);
+    
     // Build plan (enhanced content + image prompt)
     const plan = await generatePagePlan({
       scene: `${storyContext ? storyContext + "\n" : ""}${pageContent}${
@@ -477,6 +494,7 @@ app.post("/page-generate", upload.single("userImage"), async (req, res) => {
     // Build final image prompt with continuity note
     const finalImagePrompt = [
       globalContext ? `Global theme: ${globalContext}` : null,
+      continuityBlock,
       plan.enhancedContent,
       imagePromptIn || plan.imagePrompt,
       prevInline ? "Maintain visual continuity with the previous image." : null,

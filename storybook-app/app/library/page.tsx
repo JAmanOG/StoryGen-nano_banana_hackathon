@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { BookOpen, Edit3, Eye, Layers, Trash2 } from "lucide-react"
 import Link from "next/link"
+import { useAppDispatch, useAppSelector } from "@/store/hooks"
+import { resetPageByPage } from "@/store/pageByPageSlice"
 
 interface WholeStoryScene {
   id: string
@@ -29,27 +31,10 @@ interface WholeStoryData {
   isGenerated: boolean
 }
 
-interface PageByPagePage {
-  id: string
-  pageNumber: number
-  title: string
-  content: string
-  imagePrompt: string
-  isGenerated: boolean
-  generatedAt?: string | Date
-}
-
-interface PageByPageData {
-  id: string
-  title: string
-  author: string
-  pages: PageByPagePage[]
-  currentPageIndex: number
-}
-
 export default function LibraryPage() {
   const [wholeStory, setWholeStory] = useState<WholeStoryData | null>(null)
-  const [pageByPageStory, setPageByPageStory] = useState<PageByPageData | null>(null)
+  const pageByPageStory = useAppSelector((s) => s.pageByPage.story)
+  const dispatch = useAppDispatch()
 
   useEffect(() => {
     try {
@@ -68,23 +53,6 @@ export default function LibraryPage() {
     } catch (e) {
       console.warn("[Library] Failed to parse wholeStory", e)
     }
-
-    try {
-      const pbp = localStorage.getItem("pageByPageStory")
-      if (pbp) {
-        const parsed = JSON.parse(pbp)
-        console.log("[Library] Loaded pageByPageStory", {
-          title: parsed?.title,
-          pages: parsed?.pages?.length,
-          generated: parsed?.pages?.filter((p: any) => p.isGenerated).length,
-        })
-        setPageByPageStory(parsed)
-      } else {
-        console.log("[Library] No pageByPageStory found")
-      }
-    } catch (e) {
-      console.warn("[Library] Failed to parse pageByPageStory", e)
-    }
   }, [])
 
   const clearWholeStory = () => {
@@ -94,12 +62,11 @@ export default function LibraryPage() {
   }
 
   const clearPageByPage = () => {
-    console.log("[Library] Clear pageByPageStory clicked")
-    localStorage.removeItem("pageByPageStory")
-    setPageByPageStory(null)
+    console.log("[Library] Clear pageByPageStory (redux) clicked")
+    dispatch(resetPageByPage())
   }
 
-  const hasAny = !!wholeStory || !!pageByPageStory
+  const hasAny = !!wholeStory || (pageByPageStory?.pages?.length ?? 0) > 0
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-800">
@@ -173,7 +140,7 @@ export default function LibraryPage() {
               </Card>
             )}
 
-            {pageByPageStory && (
+            {pageByPageStory && pageByPageStory.pages.length > 0 && (
               <Card>
                 <CardHeader className="flex flex-row items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -203,7 +170,7 @@ export default function LibraryPage() {
                     <Link href="/page-by-page">
                       <Button size="sm" className="gap-2">
                         <Edit3 className="h-4 w-4" /> Editor
-                      </Button>
+                      </Button> 
                     </Link>
                     <Link href="/page-by-page">
                       <Button size="sm" variant="outline" className="gap-2">

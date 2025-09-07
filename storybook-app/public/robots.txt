@@ -1,0 +1,5 @@
+# robots.txt for StoryBook Creator
+User-agent: *
+Allow: /
+Sitemap: /sitemap.xml
+# Host is optional; left as relative path so it works behind proxies/CDNs

@@ -1,3 +1,5 @@
+import { store } from "@/store/store"
+
 export interface GenerationResult {
   success: boolean
   error?: string
@@ -13,19 +15,32 @@ export interface GenerationResult {
   imagePrompt?: string
   suggestions?: string[]
   imageDataUrl?: string
+  // Optional cover info when generating a whole story or standalone cover
+  cover?: { title: string; subtitle?: string; imagePrompt: string; imageDataUrl?: string }
 }
 
-// Build a concise Global Context string from localStorage entries saved by GlobalVault
+// Build a concise Global Context string from Redux (vault slice) or fallback to localStorage
 function buildGlobalContext(): string | undefined {
   try {
     if (typeof window === "undefined") return undefined
-    const raw = localStorage.getItem("globalContextItems")
-    if (!raw) return undefined
-    const items: any[] = JSON.parse(raw)
-    if (!Array.isArray(items) || items.length === 0) return undefined
 
-    const textItems = items.filter((i) => i.type === "text")
-    const imageItems = items.filter((i) => i.type === "image")
+    // Prefer Redux state if available
+    const state = store.getState?.()
+    const items = state?.vault?.items
+    let sourceItems: any[] | undefined
+
+    if (Array.isArray(items) && items.length > 0) {
+      // items from Redux are already normalized with createdAt as ISO strings
+      sourceItems = items
+    } else {
+      const raw = localStorage.getItem("globalContextItems")
+      if (raw) sourceItems = JSON.parse(raw)
+    }
+
+    if (!Array.isArray(sourceItems) || sourceItems.length === 0) return undefined
+
+    const textItems = sourceItems.filter((i) => i.type === "text")
+    const imageItems = sourceItems.filter((i) => i.type === "image")
 
     const lines: string[] = []
     if (textItems.length) {
@@ -155,7 +170,7 @@ export async function generateWholeStory(storyData: {
     }
 
     // Map backend shape to existing UI contract
-    // Backend returns: { pages: [{ pageNumber, pageContent, imagePrompt, image? }], totalPages, ... }
+    // Backend returns: { cover, pages: [{ pageNumber, pageContent, imagePrompt, image? }], totalPages, ... }
     const pages = Array.isArray(result.pages) ? result.pages : []
     const scenes = pages.map((p: any) => ({
       title: `Page ${p.pageNumber}`,
@@ -167,10 +182,21 @@ export async function generateWholeStory(storyData: {
 
     const enhancedScript = scenes.map((s:any) => s.content).join("\n\n")
 
+    // Map cover if present
+    const cover = result.cover
+      ? {
+          title: String(result.cover.title || storyData.metadata.title),
+          subtitle: String(result.cover.subtitle || ""),
+          imagePrompt: String(result.cover.imagePrompt || ""),
+          imageDataUrl: result.cover.image?.dataUrl as string | undefined,
+        }
+      : undefined
+
     return {
       success: true,
       enhancedScript,
       scenes,
+      cover,
     }
   } catch (error) {
     console.error("Story generation error:", error)
@@ -189,6 +215,8 @@ export async function generateSinglePage(pageData: {
   totalPages: number
   prevImageDataUrl?: string
   userImage?: Blob // optional reference image
+  prevPageContent?: string
+  prevPageImagePrompt?: string
 }): Promise<GenerationResult> {
   try {
     const globalContext = buildGlobalContext()
@@ -202,6 +230,8 @@ export async function generateSinglePage(pageData: {
       globalContext,
       prevImage: pageData.prevImageDataUrl,
       userImage: pageData.userImage,
+      prevPageContent: pageData.prevPageContent,
+      prevPageImagePrompt: pageData.prevPageImagePrompt,
     })
 
     const { ok, json: result } = await fetchJsonWithRetry(`${BACKEND_URL}/page-generate`, {
@@ -229,5 +259,46 @@ export async function generateSinglePage(pageData: {
       success: false,
       error: "Network error. Please check your connection and try again.",
     }
+  }
+}
+
+export async function generateCover(data: {
+  title: string
+  author?: string
+  description?: string
+  prevImageDataUrl?: string
+  userImage?: Blob
+}): Promise<{
+  success: boolean
+  error?: string
+  cover?: { title: string; subtitle: string; imagePrompt: string; imageDataUrl?: string }
+}> {
+  try {
+    const globalContext = buildGlobalContext()
+    const body = toFormData({
+      metadata: { title: data.title, author: data.author, description: data.description },
+      globalContext,
+      prevImage: data.prevImageDataUrl,
+      userImage: data.userImage,
+    })
+
+    const { ok, json } = await fetchJsonWithRetry(`${BACKEND_URL}/cover-generate`, { method: "POST", body })
+    if (!ok) return { success: false, error: json?.error || "Failed to generate cover" }
+
+    const c = json?.cover
+    return {
+      success: true,
+      cover: c
+        ? {
+            title: c.title,
+            subtitle: c.subtitle,
+            imagePrompt: c.imagePrompt,
+            imageDataUrl: c.image?.dataUrl,
+          }
+        : undefined,
+    }
+  } catch (e) {
+    console.error("Cover generation error:", e)
+    return { success: false, error: "Network error. Please try again." }
   }
 }

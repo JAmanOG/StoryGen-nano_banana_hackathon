@@ -1,71 +1,16 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { BookOpen } from "lucide-react"
 import { EnhancedPreview } from "./enhanced-preview"
 import type { StoryExportData } from "@/lib/export-utils"
-
-interface StoryPage {
-  id: string
-  pageNumber: number
-  title: string
-  content: string
-  imagePrompt: string
-  isGenerated: boolean
-  generatedAt?: Date
-  imageUrl?: string
-}
-
-interface PageByPageStory {
-  id: string
-  title: string
-  author: string
-  pages: StoryPage[]
-  currentPageIndex: number
-}
+import { useAppSelector } from "@/store/hooks"
 
 export function PageByPagePreview() {
-  const [story, setStory] = useState<PageByPageStory | null>(null)
+  const story = useAppSelector((s) => s.pageByPage.story)
   const [currentPage, setCurrentPage] = useState(0) // 0 = cover, 1+ = story pages
 
-  useEffect(() => {
-    const loadFromStorage = () => {
-      const savedStory = localStorage.getItem("pageByPageStory")
-      if (savedStory) {
-        const parsed = JSON.parse(savedStory)
-        console.log("[PBP Preview] Loaded story from localStorage", {
-          title: parsed.title,
-          pages: parsed.pages?.length,
-          generatedPages: parsed.pages?.filter((p: any) => p.isGenerated).length,
-        })
-        setStory(parsed)
-      } else {
-        console.log("[PBP Preview] No story in localStorage")
-        setStory(null)
-      }
-    }
-
-    // Initial load
-    loadFromStorage()
-
-    // Listen for updates from the editor
-    const handler = () => {
-      console.log("[PBP Preview] Detected pageByPageStoryUpdated event, reloading story from localStorage")
-      loadFromStorage()
-    }
-
-    window.addEventListener("pageByPageStoryUpdated", handler)
-    return () => {
-      window.removeEventListener("pageByPageStoryUpdated", handler)
-    }
-  }, [])
-
-  const handlePageChange = (page: number) => {
-    console.log("[PBP Preview] Change page", { from: currentPage, to: page })
-    setCurrentPage(page)
-  }
-
-  if (!story) {
+  if (!story || story.pages.length === 0) {
     return (
       <div className="text-center py-12">
         <BookOpen className="h-12 w-12 mx-auto text-gray-400 mb-4" />
@@ -107,7 +52,7 @@ export function PageByPagePreview() {
     <EnhancedPreview
       storyData={storyExportData}
       currentPage={currentPage}
-      onPageChange={handlePageChange}
+      onPageChange={setCurrentPage}
       totalPages={totalPages}
     />
   )

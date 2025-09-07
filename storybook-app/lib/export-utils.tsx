@@ -1,5 +1,5 @@
 export interface ExportOptions {
-  format: "pdf" | "html" | "json" | "txt"
+  format: "html_download" | "html_print_pdf" | "images_print_pdf"| "images_zip" | "json"
   includeImages: boolean
   pageSize?: "a4" | "letter" | "custom"
   fontSize?: "small" | "medium" | "large"
@@ -14,6 +14,12 @@ export interface StoryExportData {
     targetAge: string
     exportedAt: string
     format: string
+  }
+  cover?: {
+    title: string
+    subtitle?: string
+    imageUrl?: string
+    imagePrompt?: string
   }
   content: Array<{
     pageNumber: number
@@ -31,7 +37,6 @@ export interface StoryExportData {
 
 export function generateHTMLExport(storyData: StoryExportData, options: ExportOptions): string {
   const fontSize = options.fontSize === "small" ? "14px" : options.fontSize === "large" ? "20px" : "16px"
-
   return `
 <!DOCTYPE html>
 <html lang="en">
@@ -39,71 +44,90 @@ export function generateHTMLExport(storyData: StoryExportData, options: ExportOp
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>${storyData.metadata.title}</title>
-    <style>
-        body {
-            font-family: 'Georgia', serif;
-            line-height: 1.6;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 40px 20px;
-            font-size: ${fontSize};
-            color: #333;
-        }
-        .cover {
-            text-align: center;
-            page-break-after: always;
-            margin-bottom: 60px;
-        }
-        .cover h1 {
-            font-size: 2.5em;
-            margin-bottom: 20px;
-            color: #2c3e50;
-        }
-        .cover .author {
-            font-size: 1.2em;
-            color: #7f8c8d;
-            margin-bottom: 30px;
-        }
-        .cover .metadata {
-            background: #f8f9fa;
-            padding: 20px;
-            border-radius: 8px;
-            display: inline-block;
-        }
-        .page {
-            page-break-before: always;
-            margin-bottom: 40px;
-        }
-        .page-title {
-            font-size: 1.5em;
-            margin-bottom: 20px;
-            color: #34495e;
-            border-bottom: 2px solid #3498db;
-            padding-bottom: 10px;
-        }
-        .page-content {
-            margin-bottom: 30px;
-            text-align: justify;
-        }
-        .image-placeholder {
-            background: #ecf0f1;
-            border: 2px dashed #bdc3c7;
-            border-radius: 8px;
-            padding: 40px;
-            text-align: center;
-            margin: 20px 0;
-            color: #7f8c8d;
-            font-style: italic;
-        }
-        @media print {
-            body { margin: 0; padding: 20px; }
-            .page { page-break-before: always; }
-        }
-    </style>
+<style>
+    body {
+        font-family: 'Georgia', serif;
+        line-height: 1.6;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 40px 20px;
+        font-size: ${fontSize};
+        color: #333;
+    }
+    .cover {
+        text-align: center;
+        page-break-after: always;
+        margin-bottom: 60px;
+    }
+    .cover h1 {
+        font-size: 2.5em;
+        margin-bottom: 10px;
+        color: #2c3e50;
+    }
+    .cover .subtitle {
+        font-size: 1.2em;
+        color: #5d6d7e;
+        margin-bottom: 10px;
+    }
+    .cover .author {
+        font-size: 1.1em;
+        color: #7f8c8d;
+        margin-bottom: 20px;
+    }
+    .cover .metadata {
+        background: #f8f9fa;
+        padding: 20px;
+        border-radius: 8px;
+        display: inline-block;
+    }
+    .cover .image {
+        margin: 0 auto 20px;
+        width: 400px;   /* fixed width */
+        height: 300px;  /* fixed height */
+        object-fit: contain; /* keeps aspect ratio inside box */
+        display: block;
+    }
+    .page {
+        page-break-before: always;
+        margin-bottom: 40px;
+    }
+    .page-title {
+        font-size: 1.5em;
+        margin-bottom: 20px;
+        color: #34495e;
+        border-bottom: 2px solid #3498db;
+        padding-bottom: 10px;
+    }
+    .page-content {
+        margin-bottom: 30px;
+        text-align: justify;
+    }
+    .image-placeholder {
+        background: #ecf0f1;
+        border: 2px dashed #bdc3c7;
+        border-radius: 8px;
+        padding: 10px;
+        text-align: center;
+        margin: 20px 0;
+        color: #7f8c8d;
+        font-style: italic;
+    }
+    .image-placeholder img {
+        width: 600px;   /* fixed width */
+        height: 500px;  /* fixed height */
+        object-fit: contain;
+    }
+    @media print {
+        body { margin: 0; padding: 20px; }
+        .page { page-break-before: always; }
+    }
+</style>
 </head>
 <body>
     <div class="cover">
-        <h1>${storyData.metadata.title}</h1>
+        ${options.includeImages && storyData.cover?.imageUrl ? `<img class="image" src="${storyData.cover.imageUrl}" alt="${storyData.cover.imagePrompt || 'Cover'}" />` : ''}
+        <h1>${storyData.cover?.title || storyData.metadata.title}</h1>
+        ${storyData.cover?.subtitle ? `<div class="subtitle">${storyData.cover.subtitle}</div>` : ''}
         ${storyData.metadata.author ? `<div class="author">by ${storyData.metadata.author}</div>` : ""}
         <div class="metadata">
             ${storyData.metadata.description ? `<p><strong>Description:</strong> ${storyData.metadata.description}</p>` : ""}
@@ -130,6 +154,7 @@ export function generateHTMLExport(storyData: StoryExportData, options: ExportOp
             }
             <div class="page-content">
                 ${page.content
+                .split("image description by the user:")[0]
                   .split("\n")
                   .map((paragraph) => `<p>${paragraph}</p>`)
                   .join("")}
@@ -143,7 +168,10 @@ export function generateHTMLExport(storyData: StoryExportData, options: ExportOp
 }
 
 export function generateTextExport(storyData: StoryExportData): string {
-  let text = `${storyData.metadata.title}\n`
+  let text = `${storyData.cover?.title || storyData.metadata.title}\n`
+  if (storyData.cover?.subtitle) {
+    text += `${storyData.cover.subtitle}\n`
+  }
   if (storyData.metadata.author) {
     text += `by ${storyData.metadata.author}\n`
   }

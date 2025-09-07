@@ -20,6 +20,8 @@ import {
   Tag,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useAppDispatch, useAppSelector } from "@/store/hooks";
+import { addItem as addVaultItem, deleteItem as deleteVaultItem, setItems as setVaultItems } from "@/store/vaultSlice";
 
 interface VaultItem {
   id: string;
@@ -31,39 +33,40 @@ interface VaultItem {
 }
 
 export function GlobalVault() {
-  const [vaultItems, setVaultItems] = useState<VaultItem[]>([]);
+  const dispatch = useAppDispatch();
+  const items = useAppSelector((s) => s.vault.items);
 
-  // Load from localStorage
+  // Hydrate from localStorage once
   useEffect(() => {
     try {
-      const raw =
-        typeof window !== "undefined"
-          ? localStorage.getItem("globalContextItems")
-          : null;
+      const raw = typeof window !== "undefined" ? localStorage.getItem("globalContextItems") : null;
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
-          setVaultItems(
-            parsed.map((it) => ({
-              ...it,
-              createdAt: it.createdAt ? new Date(it.createdAt) : new Date(),
-            }))
+          dispatch(
+            setVaultItems(
+              parsed.map((it: any) => ({
+                ...it,
+                createdAt: it.createdAt ?? new Date().toISOString(),
+              }))
+            )
           );
         }
       }
     } catch (e) {
       console.warn("[Global Context] Failed to load from localStorage", e);
     }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dispatch]);
 
-  // Persist to localStorage
+  // Persist to localStorage whenever items change
   useEffect(() => {
     try {
-      localStorage.setItem("globalContextItems", JSON.stringify(vaultItems));
+      localStorage.setItem("globalContextItems", JSON.stringify(items));
     } catch (e) {
       console.warn("[Global Context] Failed to save to localStorage", e);
     }
-  }, [vaultItems]);
+  }, [items]);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState("all");
@@ -118,7 +121,7 @@ export function GlobalVault() {
     }
   };
 
-  const filteredItems = vaultItems.filter((item) => {
+  const filteredItems = items.filter((item) => {
     const matchesSearch =
       item.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
       item.content.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -157,7 +160,10 @@ export function GlobalVault() {
       createdAt: new Date(),
     };
 
-    setVaultItems([item, ...vaultItems]);
+    // Normalize createdAt to ISO for store
+    dispatch(
+      addVaultItem({ ...item, createdAt: item.createdAt.toISOString() })
+    );
     setNewItem({ type: "text", title: "", content: "", tags: "" });
     setShowAddForm(false);
 
@@ -171,7 +177,7 @@ export function GlobalVault() {
 
   const handleDeleteItem = (id: string) => {
     console.log("[Vault] Delete item", { id });
-    setVaultItems(vaultItems.filter((item) => item.id !== id));
+    dispatch(deleteVaultItem(id));
     toast({
       title: "Item Deleted",
       description: "Item removed from vault.",

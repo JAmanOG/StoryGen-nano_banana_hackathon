@@ -37,11 +37,18 @@ const storage = multer.diskStorage({
     cb(null, `${ts}-${safe}`);
   },
 });
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: {
+    fieldSize: 10 * 1024 * 1024, // allow up to 10MB text fields
+    fileSize: 20 * 1024 * 1024, // allow up to 20MB per file
+  },
+});
 
 // Initialize Google GenAI client
 const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
-const contextapiKey = process.env.CONTEXT_GOOGLE_API_KEY || process.env.CONTEXT_GEMINI_API_KEY;
+const contextapiKey =
+  process.env.CONTEXT_GOOGLE_API_KEY || process.env.CONTEXT_GEMINI_API_KEY;
 if (!apiKey) {
   console.warn("[WARN] GOOGLE_API_KEY not set. Set it in .env");
 }
@@ -52,9 +59,13 @@ const ContextgenAI = new GoogleGenAI({ contextapiKey });
 app.post("/upload", upload.single("file"), (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ success: false, error: "No file uploaded" });
+      return res
+        .status(400)
+        .json({ success: false, error: "No file uploaded" });
     }
-    const url = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+    const url = `${req.protocol}://${req.get("host")}/uploads/${
+      req.file.filename
+    }`;
     return res.json({
       success: true,
       url,
@@ -74,6 +85,7 @@ function fileToBase64(filePath) {
   return data.toString("base64");
 }
 
+// Convert data URL to { mimeType, data } or null
 function dataUrlToInlineData(dataUrl) {
   // data:[mime];base64,XXXX
   if (!dataUrl?.startsWith("data:")) return null;
@@ -87,6 +99,7 @@ function toInlineImagePart({ base64, mimeType }) {
   return { inlineData: { mimeType, data: base64 } };
 }
 
+// Extract text from response
 function extractTextFromResponse(resp) {
   // Try multiple shapes for robustness
   try {
@@ -111,6 +124,7 @@ function extractTextFromResponse(resp) {
   return "";
 }
 
+// Extract images from response
 function extractImagesFromResponse(resp) {
   console.log("Extracting images from response:", resp);
   // Return array of { mimeType, data } from inlineData parts
@@ -127,12 +141,24 @@ function extractImagesFromResponse(resp) {
   return out;
 }
 
+// Divide full script into scenes
 async function divideScriptIntoScenes(fullScript) {
   if (!fullScript || fullScript.trim().length === 0) {
     throw new Error("Full script is empty or undefined");
   }
 
-  const sysPrompt = `You are a helpful assistant that divides a children's story script into scenes. Each scene should be concise and focused on a single event or setting.\n\nScript:\n${fullScript}\n\nReturn the scenes as a JSON array of short strings. Example:\n[\n  "Scene 1: A bustling city street at dawn.",\n  "Scene 2: A quiet park with children playing.",\n  "Scene 3: A cozy café where two friends meet."\n]`;
+  const sysPrompt = `You are a helpful assistant that divides a story script into scenes for storybook. 
+  Do not shorten or overly simplify the content—just split the script into scenes and refine the language for clarity and flow. 
+  
+  Script:
+  ${fullScript}
+  
+  Return the scenes as a JSON array of strings. Example:
+  [
+    "Scene 1: A bustling city street at dawn, filled with honking cars and vendors setting up stalls.",
+    "Scene 2: A quiet park where children are playing and couples stroll under the trees.",
+    "Scene 3: A cozy café where two friends meet and share a conversation over coffee."
+  ]`;
 
   const response = await ContextgenAI.models.generateContent({
     model: "gemini-2.0-flash",
@@ -174,9 +200,13 @@ async function divideScriptIntoScenes(fullScript) {
 
   // 3) If still failed, try to extract the first JSON array found by locating the first '[' and the last ']' and parsing that slice
   if (!Array.isArray(scenes)) {
-    const firstBracket = text.indexOf('[');
-    const lastBracket = text.lastIndexOf(']');
-    if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+    const firstBracket = text.indexOf("[");
+    const lastBracket = text.lastIndexOf("]");
+    if (
+      firstBracket !== -1 &&
+      lastBracket !== -1 &&
+      lastBracket > firstBracket
+    ) {
       const candidate = text.slice(firstBracket, lastBracket + 1);
       scenes = tryParse(candidate);
     }
@@ -186,14 +216,23 @@ async function divideScriptIntoScenes(fullScript) {
 
   // 4) Give up with detailed error for debugging
   if (!Array.isArray(scenes)) {
-    throw new Error("Failed to parse scenes JSON: could not extract a valid JSON array" + "\nRaw: " + text);
+    throw new Error(
+      "Failed to parse scenes JSON: could not extract a valid JSON array" +
+        "\nRaw: " +
+        text
+    );
   }
 
   return scenes;
 }
 
+// Generate page plan: enhanced content, image prompt, suggestions
 async function generatePagePlan({ scene, globalContext }) {
-  const prompt = `You are a professional children's storybook writer and illustrator.\n${globalContext ? `Global Context (apply consistently across prose and image prompt):\n${globalContext}\n` : ""}\nScene:\n${scene}\n\nReturn strict JSON with keys: enhancedContent (string), imagePrompt (string), suggestions (string[3]).`;
+  const prompt = `You are a professional storybook writer and illustrator.\n${
+    globalContext
+      ? `Global Context (apply consistently across prose and image prompt):\n${globalContext}\n`
+      : ""
+  }\nScene:\n${scene}\n\nReturn strict JSON with keys: enhancedContent (string), imagePrompt (string), suggestions (string[3]).`;
 
   const schemaHint = `Format:\n{\n  "enhancedContent": "...",\n  "imagePrompt": "...",\n  "suggestions": ["...","...","..."]\n}`;
 
@@ -223,11 +262,16 @@ async function generatePagePlan({ scene, globalContext }) {
   return obj;
 }
 
+// generate image which may include referenceInlineParts for continuity
 async function generateImage({ prompt, referenceInlineParts = [] }) {
   console.log("Generating the image");
   // Use an image-capable preview model. If unavailable, this will just not return images.
+  const systemPrompt = `You are a professional book illustrator. Generate a high-quality, vibrant, and engaging illustration based on the prompt. Use the reference images to maintain visual continuity in style, color palette, and character appearance. Ensure the illustration is suitable for a storybook or comic book or graphic novel or based on user prompt
+  Make sure if dialogue is present, it is clearly legible and integrated into the scene naturally. The illustration should be rich in detail, with a focus on creating an immersive and captivating visual experience for young readers.
+  Make sure to make the illustration properly consistent with the previous image in terms of character look, style, and other visual elements—do not change these in the scene update; keep them the same.
+  `;
   const parts = [
-    { text: prompt },
+    { text: ` system: ${systemPrompt} \n\n user: ${prompt}` },
     ...referenceInlineParts,
   ];
   const response = await genAI.models.generateContent({
@@ -239,6 +283,117 @@ async function generateImage({ prompt, referenceInlineParts = [] }) {
   return null;
 }
 
+// Generate cover plan: title/subtitle + image prompt
+async function generateCoverPlan({ metadata = {}, globalContext = "" }) {
+  const {
+    title = "Untitled",
+    author = "Unknown Author",
+    description = "",
+  } = metadata;
+  const prompt = `You are a professional storybook cover designer.\n${
+  globalContext
+    ? `Global Context (apply consistently):\n${globalContext}\n`
+    : ""
+}
+Book metadata:
+- Title: ${title}
+- Author: ${author}
+- Description: ${description}
+
+Return strict JSON with keys:
+{ "coverTitle": string, "coverSubtitle": string, "imagePrompt": string }`;
+
+  const resp = await ContextgenAI.models.generateContent({
+    model: "gemini-2.0-flash",
+    contents: prompt,
+  });
+
+  const text = extractTextFromResponse(resp);
+  try {
+    const obj = JSON.parse(text);
+    return {
+      coverTitle: obj.coverTitle || title,
+      coverSubtitle: obj.coverSubtitle || "",
+      imagePrompt:
+        obj.imagePrompt ||
+        `A illustration for "${title}"`,
+    };
+  } catch {
+    return {
+      coverTitle: title,
+      coverSubtitle: "",
+      imagePrompt: `A illustration for "${title}" by ${author}`,
+    };
+  }
+}
+
+app.post("/cover-generate", upload.single("userImage"), async (req, res) => {
+  try {
+    const meta = (() => {
+      try {
+        return JSON.parse(req.body?.metadata || "null");
+      } catch {
+        return null;
+      }
+    })() || {
+      title: req.body?.title,
+      author: req.body?.author,
+      description: req.body?.description,
+    };
+
+    const globalContext = req.body?.globalContext || "";
+    const prevImageDataUrl = req.body?.prevImage || null;
+
+    const plan = await generateCoverPlan({ metadata: meta, globalContext });
+
+    // reference images (user image or previous image) for continuity, if any
+    const inlineRefs = [];
+    if (req.file) {
+      inlineRefs.push(
+        toInlineImagePart({
+          base64: fileToBase64(req.file.path),
+          mimeType: req.file.mimetype || "image/png",
+        })
+      );
+    }
+    const prevInline = dataUrlToInlineData(prevImageDataUrl);
+    if (prevInline) inlineRefs.push({ inlineData: prevInline });
+
+    const finalImagePrompt = [
+      globalContext ? `Global theme: ${globalContext}` : null,
+      `Front cover art for the book "${plan.coverTitle}" by ${
+        meta?.author || "Unknown Author"
+      }.`,
+      plan.imagePrompt,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+    const image = await generateImage({
+      prompt: finalImagePrompt,
+      referenceInlineParts: inlineRefs,
+    });
+
+    res.json({
+      success: true,
+      cover: {
+        title: plan.coverTitle,
+        subtitle: plan.coverSubtitle,
+        imagePrompt: finalImagePrompt,
+        image: image
+          ? {
+              mimeType: image.mimeType,
+              dataUrl: `data:${image.mimeType};base64,${image.data}`,
+            }
+          : null,
+      },
+    });
+  } catch (err) {
+    console.error("[cover-generate] error", err);
+    res.status(500).json({ error: "Failed to generate cover" });
+  }
+});
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
@@ -246,7 +401,9 @@ app.get("/health", (_req, res) => {
 async function generateImageWithTimeout(args, timeoutMs = 30000) {
   return Promise.race([
     generateImage(args),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("Image generation timeout")), timeoutMs))
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Image generation timeout")), timeoutMs)
+    ),
   ]);
 }
 
@@ -256,7 +413,12 @@ async function generateImageWithTimeout(args, timeoutMs = 30000) {
 app.post("/page-generate", upload.single("userImage"), async (req, res) => {
   try {
     const body = req.body || {};
-    console.log("Received /page-generate request with body:", body, "and file:", req.file);
+    console.log(
+      "Received /page-generate request with body:",
+      body,
+      "and file:",
+      req.file
+    );
     const pageContent = body.pageContent || "";
     const imagePromptIn = body.imagePrompt || "";
     const storyContext = body.storyContext || "";
@@ -264,6 +426,8 @@ app.post("/page-generate", upload.single("userImage"), async (req, res) => {
     const totalPages = Number(body.totalPages || 1);
     const globalContext = body.globalContext || "";
     const prevImageDataUrl = body.prevImage || null;
+    const prevPageContent = body.prevPageContent || "";
+    const prevPageImagePrompt = body.prevPageImagePrompt || "";
 
     if (!pageContent.trim()) {
       return res.status(400).json({ error: "pageContent is required" });
@@ -271,7 +435,11 @@ app.post("/page-generate", upload.single("userImage"), async (req, res) => {
 
     // Build plan (enhanced content + image prompt)
     const plan = await generatePagePlan({
-      scene: `${storyContext ? storyContext + "\n" : ""}${pageContent}${imagePromptIn ? "\n" + "image description by the user:"+ imagePromptIn : ""}`,
+      scene: `${storyContext ? storyContext + "\n" : ""}${pageContent}${
+        imagePromptIn
+          ? "\n" + "image description by the user:" + imagePromptIn
+          : ""
+      }`,
       globalContext,
     });
 
@@ -290,6 +458,22 @@ app.post("/page-generate", upload.single("userImage"), async (req, res) => {
     const prevInline = dataUrlToInlineData(prevImageDataUrl);
     if (prevInline) inlineRefs.push({ inlineData: prevInline });
 
+    const continuityBlock =
+      prevPageContent || prevPageImagePrompt
+        ? [
+            "Previous page context (for strict continuity):",
+            prevPageContent
+              ? `- Previous enhanced content:\n${prevPageContent}`
+              : null,
+            prevPageImagePrompt
+              ? `- Previous image prompt:\n${prevPageImagePrompt}`
+              : null,
+            "Do not change established character designs, outfits, UI theme, or visual style unless explicitly requested.",
+          ]
+            .filter(Boolean)
+            .join("\n")
+        : null;
+
     // Build final image prompt with continuity note
     const finalImagePrompt = [
       globalContext ? `Global theme: ${globalContext}` : null,
@@ -300,15 +484,13 @@ app.post("/page-generate", upload.single("userImage"), async (req, res) => {
       .filter(Boolean)
       .join("\n\n");
 
-      console.log("Final image prompt:", finalImagePrompt);
-      console.log("Reference inline parts:", inlineRefs);
+    console.log("Final image prompt:", finalImagePrompt);
+    console.log("Reference inline parts:", inlineRefs);
 
     const image = await generateImage({
       prompt: finalImagePrompt,
       referenceInlineParts: inlineRefs,
     });
-
-    
 
     console.log("Generated image:", image);
 
@@ -335,97 +517,187 @@ app.post("/page-generate", upload.single("userImage"), async (req, res) => {
 // Whole story generation: accepts multipart/form-data
 // Fields (text): metadata (JSON string optional), fullScript, scenes (JSON array optional), globalContext
 // Files: userImage (optional)
-app.post("/whole-story-generate", upload.single("userImage"), async (req, res) => {
-  try {
-    console.log("Received /whole-story-generate request with body:", req.body, "and file:", req.file);
-    const metadata = (() => {
-      try { return JSON.parse(req.body?.metadata || "null"); } catch { return null; }
-    })();
-    const fullScript = req.body?.fullScript || "";
-    const scenesIn = (() => {
-      try { return JSON.parse(req.body?.scenes || "null"); } catch { return null; }
-    })();
-    const globalContext = req.body?.globalContext || "";
-
-    if (!fullScript.trim() && (!Array.isArray(scenesIn) || scenesIn.length === 0)) {
-      return res.status(400).json({ error: "Provide fullScript or scenes" });
-    }
-
-    //  return
-    let scenes = scenesIn;
-    if (!Array.isArray(scenes) || scenes.length === 0) {
-      scenes = await divideScriptIntoScenes(fullScript);
-    }
-
-    console.log("Using scenes:");
-    // Initial reference image if provided
-    const inlineRefsBase = [];
-    if (req.file) {
-      inlineRefsBase.push(
-        toInlineImagePart({
-          base64: fileToBase64(req.file.path),
-          mimeType: req.file.mimetype || "image/png",
-        })
+app.post(
+  "/whole-story-generate",
+  upload.single("userImage"),
+  async (req, res) => {
+    try {
+      console.log(
+        "Received /whole-story-generate request with body:",
+        req.body,
+        "and file:",
+        req.file
       );
-    }
+      const metadata = (() => {
+        try {
+          return JSON.parse(req.body?.metadata || "null");
+        } catch {
+          return null;
+        }
+      })();
+      const fullScript = req.body?.fullScript || "";
+      const scenesIn = (() => {
+        try {
+          return JSON.parse(req.body?.scenes || "null");
+        } catch {
+          return null;
+        }
+      })();
+      const globalContext = req.body?.globalContext || "";
 
-    const pages = [];
-    let lastImageInline = inlineRefsBase[0] || null;
+      if (
+        !fullScript.trim() &&
+        (!Array.isArray(scenesIn) || scenesIn.length === 0)
+      ) {
+        return res.status(400).json({ error: "Provide fullScript or scenes" });
+      }
 
-    for (let i = 0; i < scenes.length; i++) {
-      console.log(`[whole-story-generate] Generating page ${i + 1}/${scenes.length}`);
-      const scene = scenes[i];
-      const plan = await generatePagePlan({ scene, globalContext });
+      //  return
+      let scenes = scenesIn;
+      if (!Array.isArray(scenes) || scenes.length === 0) {
+        scenes = await divideScriptIntoScenes(fullScript);
+      }
 
-      const prompt = [
+      console.log("Using scenes:");
+      // Initial reference image if provided
+      const inlineRefsBase = [];
+      if (req.file) {
+        inlineRefsBase.push(
+          toInlineImagePart({
+            base64: fileToBase64(req.file.path),
+            mimeType: req.file.mimetype || "image/png",
+          })
+        );
+      }
+
+      const coverPlan = await generateCoverPlan({ metadata, globalContext });
+      const coverPrompt = [
         globalContext ? `Global theme: ${globalContext}` : null,
-        plan.imagePrompt,
-        lastImageInline ? "Maintain visual continuity with the previous image." : null,
+        `Front cover art for the book "${
+          coverPlan.coverTitle || metadata?.title || "Untitled"
+        }" by ${metadata?.author || "Unknown Author"}.`,
+        coverPlan.imagePrompt,
       ]
         .filter(Boolean)
         .join("\n\n");
-        let image = null
-        try {
 
-      image = await generateImageWithTimeout({
-        prompt,
-        referenceInlineParts: lastImageInline ? [lastImageInline] : inlineRefsBase,
-      }, 30000);
-
-      if (image) {
-        lastImageInline = { inlineData: { mimeType: image.mimeType, data: image.data } };
+      let coverImage = null;
+      try {
+        coverImage = await generateImage(
+          { prompt: coverPrompt, referenceInlineParts: inlineRefsBase }
+        );
+      } catch (err) {
+        console.error(
+          "[whole-story-generate] Cover image generation failed:",
+          err
+        );
       }
-    } catch (err) {
-      console.error(`[whole-story-generate] Image generation failed for page ${i + 1}:`, err);
-    }
-  
-      pages.push({
-        pageNumber: i + 1,
-        pageContent: plan.enhancedContent,
-        imagePrompt: prompt,
-        image: image
-          ? {
-              mimeType: image.mimeType,
-              dataUrl: `data:${image.mimeType};base64,${image.data}`,
-            }
-          : null,
-      });
-    }
 
-    res.json({
-      success: true,
-      metadata,
-      globalContext,
-      totalPages: pages.length,
-      pages,
-    });
-  } catch (err) {
-    console.error("[whole-story-generate] error", err);
-    res.status(500).json({ error: "Failed to generate story" });
+      const pages = [];
+      let lastImageInline = coverImage
+        ? {
+            inlineData: {
+              mimeType: coverImage.mimeType,
+              data: coverImage.data,
+            },
+          }
+        : inlineRefsBase[0] || null;
+
+      for (let i = 0; i < scenes.length; i++) {
+        console.log(
+          `[whole-story-generate] Generating page ${i + 1}/${scenes.length}`
+        );
+        const scene = scenes[i];
+        const plan = await generatePagePlan({ scene, globalContext });
+
+        const prevEnhanced = pages[i - 1]?.pageContent || "";
+        const prevPrompt = pages[i - 1]?.imagePrompt || "";
+
+        const continuityBlock =
+          prevEnhanced || prevPrompt
+            ? [
+                "Previous page context (for strict continuity):",
+                prevEnhanced
+                  ? `- Previous enhanced content:\n${prevEnhanced}`
+                  : null,
+                prevPrompt ? `- Previous image prompt:\n${prevPrompt}` : null,
+                "Do not change established character designs, outfits, UI theme, or visual style unless explicitly requested.",
+              ]
+                .filter(Boolean)
+                .join("\n")
+            : null;
+
+  const prompt = [
+    globalContext ? `Global theme: ${globalContext}` : null,
+    continuityBlock,
+    plan.imagePrompt,
+    lastImageInline ? "Maintain visual continuity with the previous image." : null,
+  ]
+          .filter(Boolean)
+          .join("\n\n");
+
+        let image = null;
+        try {
+          image = await generateImageWithTimeout(
+            {
+              prompt,
+              referenceInlineParts: lastImageInline
+                ? [lastImageInline]
+                : inlineRefsBase,
+            },
+            30000
+          );
+
+          if (image) {
+            lastImageInline = {
+              inlineData: { mimeType: image.mimeType, data: image.data },
+            };
+          }
+        } catch (err) {
+          console.error(
+            `[whole-story-generate] Image generation failed for page ${i + 1}:`,
+            err
+          );
+        }
+
+        pages.push({
+          pageNumber: i + 1,
+          pageContent: plan.enhancedContent,
+          imagePrompt: prompt,
+          image: image
+            ? {
+                mimeType: image.mimeType,
+                dataUrl: `data:${image.mimeType};base64,${image.data}`,
+              }
+            : null,
+        });
+      }
+
+      res.json({
+        success: true,
+        metadata,
+        globalContext,
+        cover: {
+          title: coverPlan.coverTitle,
+          subtitle: coverPlan.coverSubtitle,
+          imagePrompt: coverPrompt,
+          image: coverImage
+            ? {
+                mimeType: coverImage.mimeType,
+                dataUrl: `data:${coverImage.mimeType};base64,${coverImage.data}`,
+              }
+            : null,
+        },
+        totalPages: pages.length,
+        pages,
+      });
+    } catch (err) {
+      console.error("[whole-story-generate] error", err);
+      res.status(500).json({ error: "Failed to generate story" });
+    }
   }
-});
+);
 
 app.listen(port, () => {
   console.log(`Backend running at http://localhost:${port}`);
 });
-

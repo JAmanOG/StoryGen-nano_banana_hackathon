@@ -1,6 +1,8 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
+import { useAppSelector, useAppDispatch } from "@/store/hooks"
+import { setInMemoryWholeStory, updateMetadata, updateFullScript, addScene, updateScene, deleteScene, markAsGenerated } from "@/store/wholeStorySlice"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -31,31 +33,16 @@ interface Scene {
   imageUrl?: string
 }
 
-interface Story {
-  metadata: StoryMetadata
-  fullScript: string
-  scenes: Scene[]
-  isGenerated: boolean
-}
-
 export function WholeStoryEditor() {
-  const [story, setStory] = useState<Story>({
-    metadata: {
-      title: "",
-      author: "",
-      description: "",
-      genre: "",
-      targetAge: "",
-    },
-    fullScript: "",
-    scenes: [],
-    isGenerated: false,
-  })
-
+  const story = useAppSelector((state) => state.wholeStory.inMemory)
+  const dispatch = useAppDispatch()
+  
   const [activeTab, setActiveTab] = useState("metadata")
   const [isGenerating, setIsGenerating] = useState(false)
   const [generationError, setGenerationError] = useState<string | null>(null)
   const { toast } = useToast()
+
+  const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"
 
   // Derived flags for contextual generation
   const hasTitle = !!story.metadata.title?.trim()
@@ -66,63 +53,96 @@ export function WholeStoryEditor() {
 
   const handleMetadataChange = (field: keyof StoryMetadata, value: string) => {
     console.log("[Whole] Metadata change", { field, value })
-    setStory((prev) => ({
-      ...prev,
-      metadata: { ...prev.metadata, [field]: value },
-    }))
+    dispatch(updateMetadata({ field, value }))
   }
 
   const handleAddScene = () => {
     console.log("[Whole] Add scene", { nextPage: story.scenes.length + 1 })
-    const newScene: Scene = {
-      id: Date.now().toString(),
-      title: `Scene ${story.scenes.length + 1}`,
-      content: "",
-      imagePrompt: "",
-      pageNumber: story.scenes.length + 1,
-    }
-    setStory((prev) => ({
-      ...prev,
-      scenes: [...prev.scenes, newScene],
-    }))
+    dispatch(addScene())
   }
 
   const handleUpdateScene = (sceneId: string, field: keyof Scene, value: string | number) => {
     console.log("[Whole] Update scene", { sceneId, field, value })
-    setStory((prev) => ({
-      ...prev,
-      scenes: prev.scenes.map((scene) => (scene.id === sceneId ? { ...scene, [field]: value } : scene)),
-    }))
+    dispatch(updateScene({ sceneId, field, value }))
   }
 
   const handleDeleteScene = (sceneId: string) => {
     console.log("[Whole] Delete scene", { sceneId })
-    setStory((prev) => ({
-      ...prev,
-      scenes: prev.scenes
-        .filter((scene) => scene.id !== sceneId)
-        .map((scene, index) => ({ ...scene, pageNumber: index + 1 })),
-    }))
+    dispatch(deleteScene(sceneId))
   }
 
-  const handleSaveStory = () => {
+  const handleFullScriptChange = (value: string) => {
+    dispatch(updateFullScript(value))
+  }
+
+  const handleSaveStory = async () => {
     console.log("[Whole] Save story", {
       title: story.metadata.title,
       scenes: story.scenes.length,
       words: story.fullScript.split(" ").filter(Boolean).length,
     })
-    // Save story to local storage or backend
-    localStorage.setItem("wholeStory", JSON.stringify(story))
-    // Notify any preview components in the same window to reload
-    try {
-      window.dispatchEvent(new Event("wholeStoryUpdated"))
-    } catch (e) {
-      console.warn("[Whole] Could not dispatch wholeStoryUpdated event", e)
+
+    // Upload any in-memory data-URL images to backend before persisting
+    async function isDataUrl(url: string | undefined) {
+      return typeof url === "string" && url.startsWith("data:")
     }
-    toast({
-      title: "Story Saved",
-      description: "Your story has been saved successfully.",
-    })
+
+    async function uploadImageDataUrl(dataUrl: string) {
+      try {
+        const res = await fetch(`${BACKEND_URL}/upload`, {
+          method: "POST",
+          body: (() => {
+            const fd = new FormData()
+            // Convert dataUrl to blob
+            const parts = dataUrl.split(",")
+            const meta = parts[0]
+            const base64 = parts[1]
+            const mime = /data:([^;]+);base64/.exec(meta)?.[1] || "image/png"
+            const byteString = atob(base64)
+            const ab = new ArrayBuffer(byteString.length)
+            const ia = new Uint8Array(ab)
+            for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i)
+            const blob = new Blob([ab], { type: mime })
+            // Provide a filename so multer will save it
+            fd.append("file", blob, `image-${Date.now()}.png`)
+            return fd
+          })(),
+        })
+        if (!res.ok) throw new Error(`Upload failed: ${res.status}`)
+        const json = await res.json()
+        return json.url || json.data?.url || null
+      } catch (err) {
+        console.error("[Whole] Image upload failed", err)
+        return null
+      }
+    }
+
+    try {
+      const updatedStory = { ...story }
+      // Upload images sequentially to avoid overloading network
+      for (let i = 0; i < updatedStory.scenes.length; i++) {
+        const s = updatedStory.scenes[i]
+        if (await isDataUrl(s.imageUrl)) {
+          const hosted = await uploadImageDataUrl(s.imageUrl!)
+          if (hosted) {
+            s.imageUrl = hosted
+          } else {
+            console.warn("[Whole] Keeping data URL for scene", s.id)
+          }
+        }
+      }
+
+      // Persist the story in Redux in-memory only (avoid localStorage for large payloads)
+      dispatch(setInMemoryWholeStory(updatedStory))
+
+      toast({
+        title: "Story Saved",
+        description: "Your story has been saved in-memory for this session.",
+      })
+    } catch (e) {
+      console.error("[Whole] Save flow failed", e)
+      toast({ title: "Save Failed", description: "Could not save story images.", variant: "destructive" })
+    }
   }
 
   const handleGenerateStorybook = async () => {
@@ -203,18 +223,19 @@ export function WholeStoryEditor() {
           fullScript: result.enhancedScript || story.fullScript,
           scenes: newScenes,
           isGenerated: true,
+          cover: result.cover
+            ? {
+                title: result.cover.title || story.metadata.title,
+                subtitle: result.cover.subtitle || "",
+                imagePrompt: result.cover.imagePrompt || "",
+                imageUrl: result.cover.imageDataUrl,
+              }
+            : story.cover,
         }
 
-        // Update state and persist so preview can pick up the changes
-        setStory(newStory)
-        console.log("newStory",newStory)
-        try {
-          localStorage.setItem("wholeStory", JSON.stringify(newStory))
-          window.dispatchEvent(new Event("wholeStoryUpdated"))
-          console.log("[PBP] Story persisted and preview notified after adding page")
-        } catch (e) {
-          console.error("[Whole] Failed to persist generated story", e)
-        }
+        // Update Redux store
+        dispatch(setInMemoryWholeStory(newStory))
+        dispatch(markAsGenerated())
 
         toast({
           title: "Storybook Generated!",
@@ -388,7 +409,7 @@ export function WholeStoryEditor() {
               <Textarea
                 placeholder="Write your complete story here... This will be used to generate the entire storybook."
                 value={story.fullScript}
-                onChange={(e) => setStory((prev) => ({ ...prev, fullScript: e.target.value }))}
+                onChange={(e) => handleFullScriptChange(e.target.value)}
                 disabled={!canEdit}
                 rows={20}
                 className="min-h-[500px] font-mono text-sm"
